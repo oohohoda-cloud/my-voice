@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#111827"><title>MY VOICE</title><link rel="manifest" href="./manifest.webmanifest"><link rel="icon" href="./icon-192.png"><style>
+*{box-sizing:border-box} [hidden]{display:none!important} html{color-scheme:dark} body{margin:0;padding: max(16px,env(safe-area-inset-top)) 15px max(18px,env(safe-area-inset-bottom));background:#111827;color:#f8fafc;font-family:system-ui,sans-serif} main{max-width:480px;margin:auto} header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:4px 0 15px} h1{font-size:26px;letter-spacing:.025em;margin:0} button{font:inherit;font-weight:700;border:0;border-radius:11px;cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent;color:#e2e8f0;background:#374151;padding:11px}button:disabled{opacity:.45;cursor:default}button:active{filter:brightness(1.25)}#tabs{display:flex;gap:5px;background:#1f2937;padding:5px;border-radius:12px;margin-bottom:12px}.tab{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;background:transparent;color:#9ca3af}.tab.selected{background:#486083;color:#fff}#renameTab{width:100%;margin-bottom:10px;padding:8px;font-size:12px}#buttons{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.slot{min-width:0;background:#243449;border-radius:15px;overflow:hidden}.voice{width:100%;background:#243449;color:white;min-height:112px;height:clamp(92px,16vh,136px);padding:12px 7px;overflow-wrap:anywhere;line-height:1.3;font-size:18px}.voice.playing{background:#13745c}.voice small{display:block;font-size:11px;font-weight:400;margin-top:8px;color:#b8c4d3}.actions{display:grid;grid-template-columns:1fr 1fr;gap:4px;padding:0 5px 5px}.actions button{min-width:0;font-size:12px;padding:10px 3px;background:#35465e}.actions .rec{grid-column:1/-1;color:#fca5a5}.rec.recording{background:#b91c1c;color:#fff}.editing .voice{height:65px;min-height:65px;font-size:15px}#stop{width:100%;margin-top:12px;padding:14px;background:#374151}#wakeBox{display:flex;align-items:center;justify-content:space-between;gap:8px;background:#1f2937;padding:10px 12px;border-radius:12px;margin-top:10px}#wakeBox strong{display:block;font-size:13px}#wakeStatus{display:block;color:#9ca3af;font-size:11px;margin-top:3px}#wake{font-size:12px;white-space:nowrap}#wake.on{background:#166534;color:#dcfce7}#tools{display:flex;gap:8px;margin-top:10px}#tools button{flex:1;font-size:12px}#status{font-size:13px;color:#cbd5e1;text-align:center;min-height:36px;overflow-wrap:anywhere;margin:12px 0}#install{width:100%;background:#1d4ed8;margin-top:8px}footer{text-align:center;color:#9ca3af;font-size:11px;line-height:1.7;margin-top:12px}
+</style></head><body><main><header><h1>MY VOICE</h1><button id="edit" type="button" aria-pressed="false">편집</button></header><div id="tabs" role="tablist"><button class="tab" role="tab">TAB 1</button><button class="tab" role="tab">TAB 2</button><button class="tab" role="tab">TAB 3</button></div><button id="renameTab" hidden>현재 탭 이름 변경</button><div id="buttons"></div><button id="stop" disabled>■ 재생 정지</button><div id="wakeBox"><div><strong>자동 화면 잠금 방지</strong><span id="wakeStatus">휴대폰 기본 잠금 설정 적용</span></div><button id="wake" aria-pressed="false">화면 유지 OFF</button></div><div id="tools" hidden><button id="backup">백업 저장</button><button id="restore">백업 복원</button><input id="restoreInput" type="file" accept=".json,application/json" hidden></div><button id="install" hidden>홈 화면에 앱 설치</button><p id="status" role="status" aria-live="polite">불러오는 중...</p><footer><div id="offline">설치 환경 확인 중</div>v0.4.0 · 2026.11.27</footer></main><script>
+'use strict';
+const clips=Array.from({length:18},(_,i)=>({id:i,label:'음성 '+String(i+1).padStart(2,'0'),blob:null}));
+const grid=document.getElementById('buttons');
+const status=document.getElementById('status');
+const stopButton=document.getElementById('stop');
+const views=[];
+let db=null, ready=false, busy=false, recording=null, active=null;
+let tab=0, edit=false, tabNames=['TAB 1','TAB 2','TAB 3'];
+const el=id=>document.getElementById(id);
+const tabButtons=[...document.querySelectorAll('.tab')];
+const editBtn=el('edit'), renameTab=el('renameTab'), backupBtn=el('backup'), restoreBtn=el('restore'), restoreInput=el('restoreInput');
+const wakeBtn=el('wake'), wakeStatus=el('wakeStatus');
+let wantWake=false, wake=null, wakePending=false, deferredInstall=null;
+function showTab(n){if(busy||recording)return;tab=n;refresh();}
+for(let i=0;i<3;i++)tabButtons[i].onclick=()=>showTab(i);
+editBtn.onclick=()=>{if(busy||recording)return;edit=!edit;refresh();};
+renameTab.onclick=async()=>{if(busy||recording)return;const name=prompt('탭 이름',tabNames[tab]);if(name===null||!name.trim())return;const next=tabNames.slice();next[tab]=name.trim().slice(0,24);busy=true;refresh();try{await saveSettings(next);tabNames=next;say('탭 이름 저장 완료');}catch(e){say('탭 이름 저장 실패');}finally{busy=false;refresh();}};
+
+function say(s){status.textContent=s;}
+function stopPlayback(){if(!active)return;const old=active;active=null;old.audio.pause();old.audio.removeAttribute('src');old.audio.load();URL.revokeObjectURL(old.url);views[old.id].play.classList.remove('playing');}
+function refresh(){
+  for(const clip of clips){const v=views[clip.id];v.slot.hidden=Math.floor(clip.id/6)!==tab;v.actions.hidden=!edit;v.play.disabled=!ready||busy||!!recording;v.rec.disabled=!ready||busy||(!!recording&&recording.id!==clip.id);v.rename.disabled=!ready||busy||!!recording;v.import.disabled=!ready||busy||!!recording;
+    v.label.textContent='▶ '+clip.label;v.info.textContent=clip.blob?'녹음 등록됨':'미등록';
+    const on=recording&&recording.id===clip.id;v.rec.textContent=on?'■ 녹음 종료':clip.blob?'● 다시 녹음':'● 녹음';v.rec.classList.toggle('recording',!!on);
+  }
+  stopButton.disabled=!ready||busy||!!recording;
+  editBtn.disabled=!ready||busy||!!recording;editBtn.textContent=edit?'완료':'편집';editBtn.setAttribute('aria-pressed',String(edit));
+  grid.classList.toggle('editing',edit);renameTab.hidden=!edit;renameTab.disabled=!ready||busy||!!recording;
+  el('tools').hidden=!edit;backupBtn.disabled=restoreBtn.disabled=!ready||busy||!!recording||!db;
+  tabButtons.forEach((b,i)=>{b.textContent=tabNames[i];b.classList.toggle('selected',i===tab);b.setAttribute('aria-selected',String(i===tab));b.disabled=!ready||busy||!!recording;});
+
+}
+function openDB(){return new Promise((resolve,reject)=>{try{const r=indexedDB.open('my_voice_soundboard',2);r.onupgradeneeded=()=>{if(!r.result.objectStoreNames.contains('clips'))r.result.createObjectStore('clips',{keyPath:'id'});if(!r.result.objectStoreNames.contains('settings'))r.result.createObjectStore('settings');};r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);r.onblocked=()=>reject(new Error('저장소가 잠겨 있습니다.'));}catch(e){reject(e);}});}
+function readDB(){return new Promise((resolve,reject)=>{try{const tx=db.transaction('clips','readonly');const r=tx.objectStore('clips').getAll();r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);tx.onabort=()=>reject(tx.error);}catch(e){reject(e);}});}
+function save(clip){return new Promise((resolve,reject)=>{if(!db){reject(new Error('저장소 사용 불가'));return;}try{const tx=db.transaction('clips','readwrite');tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error);tx.onabort=()=>reject(tx.error);tx.objectStore('clips').put({id:clip.id,label:clip.label,blob:clip.blob});}catch(e){reject(e);}});}
+function playClip(clip){if(!ready||busy||recording)return;stopPlayback();if(!clip.blob){say(clip.label+': 먼저 녹음하거나 파일을 등록해 주세요.');return;}
+  const url=URL.createObjectURL(clip.blob),audio=new Audio(url),current={id:clip.id,audio,url};active=current;views[clip.id].play.classList.add('playing');say(clip.label+' 재생 중');
+  const fail=()=>{if(active!==current)return;stopPlayback();say('재생할 수 없습니다. 다른 음성 파일을 등록하거나 다시 녹음해 주세요.');};
+  audio.addEventListener('ended',()=>{if(active===current){stopPlayback();say('재생 완료');}});audio.addEventListener('error',fail);
+  try{const p=audio.play();if(p&&p.catch)p.catch(fail);}catch(e){fail();}
+}
+function release(stream){if(stream)stream.getTracks().forEach(t=>t.stop());}
+function recordError(e,stage){
+  const name=e&&e.name||'UnknownError';
+  const tips={NotAllowedError:'마이크 권한 또는 브라우저 보안 제한',NotReadableError:'마이크 사용 중 또는 기기 접근 오류',NotFoundError:'사용할 마이크를 찾지 못함',SecurityError:'브라우저에서 녹음을 제한함',NotSupportedError:'녹음 형식을 지원하지 않음',AbortError:'마이크 접근 중단',InvalidStateError:'현재 화면에서 녹음할 수 없음'};
+  say('녹음 실패 ['+stage+' / '+name+'] '+(tips[name]||(e&&e.message)||'')+' · 파일 등록 버튼으로 우회할 수 있습니다.');
+}
+async function importClip(clip,file){
+  if(!file||!ready||busy||recording)return;
+  if(!file.size){say('빈 파일입니다. 다시 선택해 주세요.');return;}
+  if(!/^audio\//i.test(file.type)&&!(/\.(m4a|mp3|wav|aac|ogg|opus|webm|3ga|3gp|flac|amr|mp4)$/i.test(file.name))){say('음성 파일을 선택해 주세요.');return;}
+  stopPlayback();busy=true;refresh();
+  try{
+    const ext=(file.name.split('.').pop()||'').toLowerCase();
+    const types={m4a:'audio/mp4',mp3:'audio/mpeg',wav:'audio/wav',aac:'audio/aac',ogg:'audio/ogg',opus:'audio/ogg',webm:'audio/webm',flac:'audio/flac','3ga':'audio/3gpp','3gp':'audio/3gpp',amr:'audio/amr',mp4:'audio/mp4'};
+    const type=/^audio\//i.test(file.type)?file.type:(types[ext]||file.type);
+    const blob=new Blob([await file.arrayBuffer()],{type});
+    if(!blob.size)throw new Error('빈 음성 파일');
+    if(db){await save({...clip,blob});clip.blob=blob;say(clip.label+' 파일 등록 및 저장 완료');}else{clip.blob=blob;say('파일 등록 완료. 자동 저장 불가: 현재 화면에서만 유지됩니다.');}
+  }catch(e){say('파일 등록 실패: '+(e.message||e.name||'파일 읽기 오류')+' · 기존 음성은 유지됩니다.');}
+  finally{busy=false;refresh();}
+}
+async function toggleRecord(clip){
+  if(!ready||busy)return;
+  if(recording){if(recording.id!==clip.id)return;busy=true;refresh();say('녹음 저장 중...');try{recording.recorder.stop();}catch(e){release(recording.stream);recording=null;busy=false;refresh();say('녹음 종료 실패. 기존 음성은 유지됩니다.');}return;}
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia||typeof MediaRecorder==='undefined'){say('직접 녹음 미지원 ['+location.protocol+' / 보안 환경 '+(window.isSecureContext?'예':'아니오')+'] · 파일 등록 버튼을 사용하세요.');return;}
+  stopPlayback();busy=true;refresh();say('마이크 사용 권한을 확인하는 중...');let stream;let stage='마이크 접근';
+  try{
+    stream=await navigator.mediaDevices.getUserMedia({audio:true});
+    stage='녹음기 생성';const recorder=new MediaRecorder(stream);const chunks=[];const session={id:clip.id,recorder,stream,failed:false};
+    recorder.ondataavailable=e=>{if(e.data&&e.data.size)chunks.push(e.data);};
+    recorder.onerror=()=>{session.failed=true;release(stream);if(recording===session){recording=null;busy=false;refresh();say('녹음 오류. 기존 음성은 유지됩니다.');}};
+    recorder.onstop=async()=>{
+      release(stream);if(recording!==session||session.failed)return;
+      busy=true;refresh();
+      try{const blob=new Blob(chunks,{type:recorder.mimeType||(chunks[0]&&chunks[0].type)||'audio/webm'});if(!blob.size){say('녹음 내용이 없습니다. 기존 음성은 유지됩니다.');return;}
+        if(db){await save({...clip,blob});clip.blob=blob;say(clip.label+' 녹음 저장 완료');}else{clip.blob=blob;say('녹음 완료. 자동 저장 불가: 현재 화면에서만 유지됩니다.');}
+      }catch(e){say('녹음 저장 실패. 기존 음성은 유지됩니다. 다시 시도해 주세요.');}
+      finally{recording=null;busy=false;refresh();}
+    };
+    stage='녹음 시작';recorder.start();recording=session;busy=false;refresh();say(clip.label+' 녹음 중... 같은 버튼을 눌러 종료하세요.');
+  }catch(e){release(stream);recording=null;busy=false;refresh();recordError(e,stage);}
+}
+async function rename(clip){if(!ready||busy||recording)return;const value=prompt('버튼 이름을 입력하세요.',clip.label);if(value===null||!value.trim())return;const label=value.trim().slice(0,40);busy=true;refresh();try{if(db)await save({...clip,label});clip.label=label;say(db?'버튼 이름 저장 완료':'이름 변경 완료. 현재 화면에서만 유지됩니다.');}catch(e){say('이름 저장 실패. 기존 이름은 유지됩니다.');}finally{busy=false;refresh();}}
+for(const clip of clips){const slot=document.createElement('div');slot.className='slot';const play=document.createElement('button');play.type='button';play.className='voice';const label=document.createElement('span');const info=document.createElement('small');play.append(label,info);const actions=document.createElement('div');actions.className='actions';const rec=document.createElement('button');rec.type='button';rec.className='rec';const name=document.createElement('button');name.type='button';name.className='rename';name.textContent='이름 변경';const imp=document.createElement('button');imp.type='button';imp.className='import';imp.textContent='파일 등록';const input=document.createElement('input');input.type='file';input.accept='audio/*,.m4a,.mp3,.wav,.aac,.3ga,.3gp,.amr';input.hidden=true;actions.append(rec,imp,name);slot.append(play,actions,input);grid.append(slot);views.push({slot,actions,play,label,info,rec,rename:name,import:imp});play.onclick=()=>playClip(clip);rec.onclick=()=>toggleRecord(clip);name.onclick=()=>rename(clip);imp.onclick=()=>{input.value='';input.click();};input.onchange=()=>{const file=input.files&&input.files[0];if(file)importClip(clip,file);input.value='';};}
+stopButton.onclick=()=>{stopPlayback();say('재생 정지');};
+
+function validNames(a){return Array.isArray(a)&&a.length===3&&a.every(x=>typeof x==='string'&&x.trim()&&x.length<=24);}
+function loadSettings(){return new Promise((resolve,reject)=>{const r=db.transaction('settings','readonly').objectStore('settings').get('tabs');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);});}
+function saveSettings(names){return new Promise((resolve,reject)=>{if(!db)return reject(new Error('저장소 사용 불가'));const tx=db.transaction('settings','readwrite');tx.oncomplete=resolve;tx.onerror=tx.onabort=()=>reject(tx.error);tx.objectStore('settings').put(names,'tabs');});}
+function blobToData(blob){return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=()=>reject(r.error);r.readAsDataURL(blob);});}
+backupBtn.onclick=async()=>{if(!db||busy||recording)return;busy=true;refresh();say('백업 만드는 중...');try{const data={format:'my-voice-backup-v1',tabs:tabNames,clips:[]};for(const c of clips)data.clips.push({id:c.id,label:c.label,data:c.blob?await blobToData(c.blob):null});const blob=new Blob([JSON.stringify(data)],{type:'application/json'});const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='my_voice_backup_'+new Date().toISOString().slice(0,10)+'.json';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);say('백업 파일 다운로드 요청 완료');}catch(e){say('백업 실패: '+e.message);}finally{busy=false;refresh();}};
+restoreBtn.onclick=()=>{if(!busy&&!recording){restoreInput.value='';restoreInput.click();}};
+restoreInput.onchange=async()=>{const file=restoreInput.files?.[0];restoreInput.value='';if(!file||busy||recording||!db)return;if(!confirm('백업으로 현재 18개 음성과 이름을 모두 교체할까요?'))return;stopPlayback();busy=true;refresh();say('백업 복원 중...');try{
+ if(file.size>150*1024*1024)throw new Error('백업 파일이 너무 큽니다.');const data=JSON.parse(await file.text());if(data.format!=='my-voice-backup-v1'||!validNames(data.tabs)||!Array.isArray(data.clips)||data.clips.length!==18)throw new Error('지원하지 않는 백업 파일');const next=[];
+ for(let i=0;i<18;i++){const c=data.clips[i];if(c.id!==i||typeof c.label!=='string'||!c.label.trim()||c.label.length>40)throw new Error('잘못된 음성 정보');let blob=null;if(c.data!==null){if(typeof c.data!=='string'||!/^data:(?:audio\/[^;,]+|application\/octet-stream|video\/[^;,]+)?(?:;[^;,]+)*;base64,/i.test(c.data))throw new Error('잘못된 녹음 데이터');const j=c.data.indexOf(',');const type=c.data.slice(5,j-7);const raw=atob(c.data.slice(j+1));const bytes=Uint8Array.from(raw,x=>x.charCodeAt(0));if(!bytes.length)throw new Error('빈 녹음 데이터');blob=new Blob([bytes],{type});}next.push({id:i,label:c.label,blob});}
+ await new Promise((resolve,reject)=>{const tx=db.transaction(['clips','settings'],'readwrite');tx.oncomplete=resolve;tx.onerror=tx.onabort=()=>reject(tx.error);const s=tx.objectStore('clips');s.clear();for(const c of next)s.put(c);tx.objectStore('settings').put(data.tabs,'tabs');});
+ next.forEach((c,i)=>Object.assign(clips[i],c));tabNames=data.tabs;say('복원 완료');
+ }catch(e){say('복원 실패. 기존 데이터 유지: '+e.message);}finally{busy=false;refresh();}};
+function updateWake(){wakeBtn.setAttribute('aria-pressed',String(wantWake));wakeBtn.textContent=wantWake?'화면 유지 ON':'화면 유지 OFF';wakeBtn.classList.toggle('on',wantWake);if(!wantWake)wakeStatus.textContent='휴대폰 기본 잠금 설정 적용';else if(wake&&!wake.released)wakeStatus.textContent='화면 켜짐 유지 중';else if(wakePending)wakeStatus.textContent='화면 유지 요청 중';}
+async function acquireWake(){if(!wantWake||wakePending||(wake&&!wake.released)||document.visibilityState!=='visible')return;if(!navigator.wakeLock){wakeStatus.textContent='이 실행 환경에서는 화면 유지 미지원';return;}wakePending=true;updateWake();try{const lock=await navigator.wakeLock.request('screen');if(!wantWake||document.visibilityState!=='visible'){await lock.release();return;}wake=lock;lock.addEventListener('release',()=>{if(wake===lock){wake=null;if(wantWake)wakeStatus.textContent='화면 유지 일시 해제 · 복귀 시 재요청';updateWake();}});updateWake();}catch(e){wakeStatus.textContent='화면 유지 요청 실패: '+e.name;}finally{wakePending=false;if(wake&&!wake.released)updateWake();}}
+wakeBtn.onclick=async()=>{wantWake=!wantWake;updateWake();if(wantWake)await acquireWake();else if(wake){try{await wake.release();}catch(e){}wake=null;updateWake();}};
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&wantWake)acquireWake();});
+window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredInstall=e;el('install').hidden=false;});
+el('install').onclick=async()=>{if(!deferredInstall)return;const p=deferredInstall;deferredInstall=null;el('install').hidden=true;try{await p.prompt();}catch(e){say('Chrome 메뉴에서 앱을 설치해 주세요.');}};
+window.addEventListener('appinstalled',()=>{deferredInstall=null;el('install').hidden=true;say('앱 설치 완료');});
+if('serviceWorker' in navigator && /^https?:$/.test(location.protocol))navigator.serviceWorker.register('./sw.js').then(()=>navigator.serviceWorker.ready).then(()=>{el('offline').textContent='오프라인 실행 준비 완료';}).catch(()=>{el('offline').textContent='오프라인 준비 실패 · 인터넷 연결 확인';});else el('offline').textContent='로컬 시험 모드 · 앱 설치는 HTTPS 배포 후 가능';
+
+refresh();
+(async()=>{try{db=await openDB();const saved=await readDB();for(const item of saved){if(Number.isInteger(item.id)&&clips[item.id]){if(typeof item.label==='string'&&item.label.trim())clips[item.id].label=item.label;if(item.blob instanceof Blob&&item.blob.size)clips[item.id].blob=item.blob;}}try{const names=await loadSettings();if(validNames(names))tabNames=names;}catch(e){}say('편집 버튼을 눌러 음성을 등록하세요.');}catch(e){db=null;say('자동 저장을 사용할 수 없습니다. 등록한 음성은 현재 화면에서만 유지됩니다.');}finally{ready=true;refresh();}})();
+</script></body></html>
